@@ -246,7 +246,8 @@ Output ONLY valid JSON with this exact shape:
 {
   "priority": <integer 0-10>,
   "needs_evacuation": <boolean>,
-  "briefing": "<single sentence, <=140 chars, written for a first responder>"
+  "briefing": "<single sentence, <=140 chars, written for a first responder>",
+  "recommended_action": "<clear action responders should take>"
 }
 
 Priority guidance:
@@ -276,7 +277,7 @@ Call Transcript:
 ${transcript || reason || 'No transcript available'}
 """
 
-Analyze this emergency call and return ONLY the JSON object with priority, needs_evacuation, and briefing.`;
+Analyze this emergency call and return ONLY the JSON object with priority, needs_evacuation, briefing, and recommended_action.`;
 
   try {
     let responseText;
