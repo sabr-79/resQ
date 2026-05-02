@@ -62,10 +62,10 @@ const ELEVENLABS_AGENT_ID =
 // -----------------------------------------------------------------------------
 async function geocodeAddress(address) {
   if (!address || address === 'Location not provided') {
-    // Default to San Francisco if no address
+    // Default to Minneapolis if no address
     return {
-      lat: 37.7749 + (Math.random() - 0.5) * 0.05,
-      lng: -122.4194 + (Math.random() - 0.5) * 0.05,
+      lat: 44.9778 + (Math.random() - 0.5) * 0.05,
+      lng: -93.2650 + (Math.random() - 0.5) * 0.05,
     };
   }
 
@@ -93,10 +93,10 @@ async function geocodeAddress(address) {
     console.error('[geocode] Error:', error.message);
   }
 
-  // Fallback to random SF location if geocoding fails
+  // Fallback to random Minneapolis location if geocoding fails
   return {
-    lat: 37.7749 + (Math.random() - 0.5) * 0.05,
-    lng: -122.4194 + (Math.random() - 0.5) * 0.05,
+    lat: 44.9778 + (Math.random() - 0.5) * 0.05,
+    lng: -93.2650 + (Math.random() - 0.5) * 0.05,
   };
 }
 

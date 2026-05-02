@@ -84,8 +84,8 @@ function MapController({ selectedPatient }: { selectedPatient: Patient | null })
 }
 
 export default function Map({ patients, selectedPatient, onSelectPatient }: MapProps) {
-  // Default center: San Francisco
-  const defaultCenter: [number, number] = [37.7749, -122.4194];
+  // Default center: Minneapolis
+  const defaultCenter: [number, number] = [44.9778, -93.2650];
   const defaultZoom = 13;
 
   // Filter patients with valid coordinates
