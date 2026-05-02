@@ -9,13 +9,16 @@ interface Patient {
   id: string;
   name: string;
   address: string;
+  phone: string;
+  medical_conditions: string;
+  required_devices: string;
   priority: number;
-  status: string;
+  needs_evacuation: boolean;
   briefing: string;
+  status: string;
+  created_at: string;
   lat?: number;
   lng?: number;
-  medical_conditions?: string;
-  required_devices?: string;
 }
 
 interface MapProps {
