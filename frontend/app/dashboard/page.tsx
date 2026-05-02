@@ -46,7 +46,6 @@ export default function Dashboard() {
   const [patients, setPatients] = useState<Patient[]>([]);
   const [selectedPatient, setSelectedPatient] = useState<Patient | null>(null);
   const [loading, setLoading] = useState(true);
-  const [simulating, setSimulating] = useState(false);
   const [time, setTime] = useState('');
 
   // Update time
@@ -95,26 +94,6 @@ export default function Dashboard() {
     }
   }
 
-  async function simulateDisaster() {
-    setSimulating(true);
-    try {
-      const response = await fetch(`${BACKEND_URL}/simulate-disaster`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ event: 'Wildfire', area: 'Demo County' }),
-      });
-      const data = await response.json();
-      console.log('Simulation result:', data);
-      alert(`Simulated disaster: ${data.contacted} residents contacted, ${data.triaged?.length || 0} triaged`);
-      loadPatients();
-    } catch (err) {
-      console.error('Simulation error:', err);
-      alert('Simulation failed - check console');
-    } finally {
-      setSimulating(false);
-    }
-  }
-
   function getPriorityColor(priority: number) {
     if (priority >= 8) return '#EF4444'; // Red - Critical
     if (priority >= 6) return '#F97316'; // Orange - Urgent
@@ -159,23 +138,6 @@ export default function Dashboard() {
         </div>
         <div style={{ display: 'flex', alignItems: 'center', gap: 24 }}>
           <span style={{ color: '#555', fontSize: 13, fontFamily: 'monospace' }}>{time}</span>
-          <button
-            onClick={simulateDisaster}
-            disabled={simulating}
-            style={{
-              background: simulating ? '#555' : '#EF4444',
-              color: 'white',
-              border: 'none',
-              padding: '10px 20px',
-              borderRadius: 6,
-              fontSize: 13,
-              fontWeight: 600,
-              cursor: simulating ? 'not-allowed' : 'pointer',
-              letterSpacing: '0.5px',
-            }}
-          >
-            {simulating ? '⏳ Simulating...' : '🚨 Simulate Disaster'}
-          </button>
           <a href="/" style={{
             color: '#888',
             fontSize: 13,
@@ -241,7 +203,7 @@ export default function Dashboard() {
                 <div style={{ fontSize: 48, marginBottom: 16 }}>📋</div>
                 <div style={{ fontSize: 14, marginBottom: 8 }}>No active cases</div>
                 <div style={{ fontSize: 12, color: '#444' }}>
-                  Click "Simulate Disaster" to test the system
+                  Waiting for emergency calls...
                 </div>
               </div>
             )}
