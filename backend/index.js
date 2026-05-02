@@ -708,17 +708,30 @@ app.post('/simulate-disaster', async (req, res) => {
     alert: { event, area, time: new Date().toISOString() },
     contacted: targeted.length,
     triaged,
-  });
+ });
 });
 
-// -----------------------------------------------------------------------------
+app.post('/elevenlabs-webhook', async (req, res) => {
+  console.log('ElevenLabs webhook received:', req.body);
+  const { name, location, reason } = req.body;
+  if (name) {
+    await supabase.from('patients').insert([{
+      name: name || 'Unknown Caller',
+      address: location || 'Unknown Address',
+      medical_conditions: reason || 'Emergency reported',
+      required_devices: 'None',
+      lat: 44.9778 + (Math.random() - 0.5) * 0.05,
+      lng: -93.2650 + (Math.random() - 0.5) * 0.05,
+      status: 'Triage Pending',
+      priority: 5,
+      briefing: `Emergency call from ${name}. ${reason}`,
+      needs_evacuation: false,
+    }]);
+  }
+  res.json({ success: true });
+});
+
 const PORT = process.env.PORT || 3001;
 app.listen(PORT, () => {
-  const aiProvider = AI_PROVIDER === 'anthropic' && anthropic ? 'Anthropic Claude' 
-    : AI_PROVIDER === 'featherless' && featherlessApiKey ? 'Featherless (Llama 3.1 70B)'
-    : 'Heuristic fallback';
-  
   console.log(`ResQ backend running on port ${PORT}`);
-  console.log(`  AI Provider: ${aiProvider}`);
-  console.log(`  Twilio:      ${twilioClient ? 'enabled' : 'simulated (no creds)'}`);
 });
