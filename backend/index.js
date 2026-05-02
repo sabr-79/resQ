@@ -480,7 +480,8 @@ function runHeuristicTriage({ transcript, reason, equipment }) {
 }
 
 app.post('/triage', async (req, res) => {
-  const { patient_id, transcript, name, location, reason } = req.body;
+  let { patient_id } = req.body;
+  const { transcript, name, location, reason } = req.body;
   
   // Support both registered patients and new callers
   let patient = null;
