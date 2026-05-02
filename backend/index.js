@@ -671,55 +671,72 @@ app.post('/elevenlabs-webhook', async (req, res) => {
         .join('\n');
     }
     
-    // Extract from user messages in order
-    const userMessages = transcript.filter(t => t.role === 'user').map(t => t.message);
+    // PRIORITY 1: Look for structured data in agent's final message (name:, location:, reason:)
+    const agentMessages = transcript.filter(t => t.role === 'agent');
+    const lastAgentMessage = agentMessages[agentMessages.length - 1];
     
-    if (userMessages.length >= 1) {
-      name = userMessages[0].trim();
-    }
-    
-    if (userMessages.length >= 2) {
-      location = userMessages[1].trim();
-    }
-    
-    if (userMessages.length >= 3) {
-      // Combine all remaining messages as the reason
-      reason = userMessages.slice(2).join(' ').trim();
-    }
-    
-    // Fallback: try to extract from agent confirmation message
-    if (!name || !location || !reason) {
-      const agentMessages = transcript.filter(t => t.role === 'agent');
+    if (lastAgentMessage && lastAgentMessage.message) {
+      const msg = lastAgentMessage.message;
       
+      // Check if the agent provided structured output
+      const nameMatch = msg.match(/\bname:\s*(.+?)(?:\n|$)/i);
+      const locationMatch = msg.match(/\blocation:\s*(.+?)(?:\n|$)/i);
+      const reasonMatch = msg.match(/\breason:\s*(.+?)(?:\n|$)/i);
+      
+      if (nameMatch) name = nameMatch[1].trim();
+      if (locationMatch) location = locationMatch[1].trim();
+      if (reasonMatch) reason = reasonMatch[1].trim();
+    }
+    
+    // PRIORITY 2: Extract from user messages in order (if structured data not found)
+    if (!name || !location || !reason) {
+      const userMessages = transcript.filter(t => t.role === 'user').map(t => t.message);
+      
+      if (!name && userMessages.length >= 1) {
+        name = userMessages[0].trim();
+      }
+      
+      if (!location && userMessages.length >= 2) {
+        location = userMessages[1].trim();
+      }
+      
+      if (!reason && userMessages.length >= 3) {
+        // Combine all remaining messages as the reason
+        reason = userMessages.slice(2).join(' ').trim();
+      }
+    }
+    
+    // PRIORITY 3: Try to extract from agent confirmation message
+    if (!name || !location || !reason) {
       for (const agentMsg of agentMessages) {
         const msg = agentMsg.message;
         
         // Look for confirmation pattern: "your name is X, you are located at Y, and you are Z"
         if (msg.includes('to confirm') || msg.includes('your name is')) {
           if (!name) {
-            const nameMatch = msg.match(/(?:name is|name:|called)\s+([^,\.]+?)(?:,|\.|you are|and)/i);
+            const nameMatch = msg.match(/(?:name is|called)\s+([^,\.]+?)(?:,|\.|you are|and)/i);
             if (nameMatch) name = nameMatch[1].trim();
           }
           
           if (!location) {
-            const locMatch = msg.match(/(?:located at|location:|address:?)\s+([^,\.]+?(?:Avenue|Street|Road|Drive|Boulevard|Lane|Court|Way|Place)[^,\.]*?)(?:,|\.|and|you are)/i);
+            const locMatch = msg.match(/(?:located at|you are at)\s+([^,\.]+?(?:Avenue|Street|Road|Drive|Boulevard|Lane|Court|Way|Place)[^,\.]*?)(?:,|\.|and|you are)/i);
             if (locMatch) location = locMatch[1].trim();
           }
           
           if (!reason) {
-            const reasonMatch = msg.match(/(?:you are|and you|condition:|emergency:)\s+([^\.]+)/i);
+            const reasonMatch = msg.match(/(?:you are|and you)\s+([^\.]+?)(?:\.|help is on the way)/i);
             if (reasonMatch) reason = reasonMatch[1].trim();
           }
         }
       }
     }
     
-    // Last fallback: use transcript summary
+    // PRIORITY 4: Last fallback - use transcript summary
     if (!name || !location || !reason) {
       const summary = data.analysis?.transcript_summary || '';
       
       if (!name) {
-        const summaryNameMatch = summary.match(/(?:from|called|user,?)\s+([A-Z][a-z]+\s+[A-Z][a-z]+)/);
+        const summaryNameMatch = summary.match(/(?:from|called|user,?)\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)/);
         name = summaryNameMatch ? summaryNameMatch[1].trim() : 'Unknown Caller';
       }
       
