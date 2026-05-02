@@ -31,14 +31,27 @@ const supabase = createClient(
   process.env.SUPABASE_ANON_KEY
 );
 
+// AI Provider setup - supports both Anthropic and Featherless
+const AI_PROVIDER = process.env.AI_PROVIDER || 'featherless';
+
 const anthropic = process.env.ANTHROPIC_API_KEY
   ? new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY })
   : null;
 
-const twilioClient =
-  process.env.TWILIO_ACCOUNT_SID && process.env.TWILIO_AUTH_TOKEN
-    ? twilio(process.env.TWILIO_ACCOUNT_SID, process.env.TWILIO_AUTH_TOKEN)
-    : null;
+// Featherless uses OpenAI-compatible API
+const featherlessApiKey = process.env.FEATHERLESS_API_KEY;
+const FEATHERLESS_BASE_URL = 'https://api.featherless.ai/v1';
+
+// Only initialize Twilio if we have real credentials (not placeholders)
+const hasTwilioCreds = 
+  process.env.TWILIO_ACCOUNT_SID && 
+  process.env.TWILIO_AUTH_TOKEN &&
+  process.env.TWILIO_ACCOUNT_SID.startsWith('AC') &&
+  !process.env.TWILIO_ACCOUNT_SID.includes('your_');
+
+const twilioClient = hasTwilioCreds
+  ? twilio(process.env.TWILIO_ACCOUNT_SID, process.env.TWILIO_AUTH_TOKEN)
+  : null;
 
 const PUBLIC_BASE_URL = process.env.PUBLIC_BASE_URL || 'http://localhost:3001';
 const ELEVENLABS_AGENT_ID =
@@ -48,11 +61,17 @@ const ELEVENLABS_AGENT_ID =
 // Health + sanity
 // -----------------------------------------------------------------------------
 app.get('/', (_req, res) => {
+  const aiProvider = AI_PROVIDER === 'anthropic' && anthropic ? 'anthropic' 
+    : AI_PROVIDER === 'featherless' && featherlessApiKey ? 'featherless'
+    : 'heuristic';
+  
   res.json({
     service: 'ResQ backend',
     status: 'ok',
     capabilities: {
+      ai_provider: aiProvider,
       anthropic: !!anthropic,
+      featherless: !!featherlessApiKey,
       twilio: !!twilioClient,
       supabase: !!process.env.SUPABASE_URL,
     },
@@ -63,6 +82,12 @@ app.get('/test-db', async (_req, res) => {
   const { data, error } = await supabase.from('calls').select('*').limit(50);
   if (error) return res.status(500).json({ error: error.message });
   res.json({ success: true, data });
+});
+
+app.get('/test-patients', async (_req, res) => {
+  const { data, error } = await supabase.from('patients').select('*').limit(50);
+  if (error) return res.status(500).json({ error: error.message });
+  res.json({ success: true, count: data?.length || 0, data });
 });
 
 // -----------------------------------------------------------------------------
@@ -166,28 +191,56 @@ app.post('/call-status', async (req, res) => {
 // -----------------------------------------------------------------------------
 // Claude triage — turn a transcript into a priority + briefing
 // -----------------------------------------------------------------------------
-// POST /triage { patient_id, transcript }
+// POST /triage { patient_id?, name?, location?, reason?, transcript }
 //   -> { priority, needs_evacuation, briefing, status }
-async function runClaudeTriage({ patient, transcript }) {
-  if (!anthropic) {
-    // Heuristic fallback so the demo still works without an API key.
-    const t = (transcript || '').toLowerCase();
-    const equip = (patient.required_devices || '').toLowerCase();
-    let priority = 3;
-    if (/ventilator|oxygen|dialysis/.test(equip)) priority = 8;
-    if (/no power|power out|battery (dead|dying|low)/.test(t)) priority += 1;
-    if (/can'?t breathe|trouble breathing|chest pain/.test(t)) priority = 10;
-    if (priority > 10) priority = 10;
-    return {
-      priority,
-      needs_evacuation: priority >= 7,
-      briefing: `Auto-triage: ${patient.required_devices || 'no equipment listed'} · status pending human review.`,
-    };
+
+async function callFeatherlessAPI(messages, systemPrompt) {
+  const response = await fetch(`${FEATHERLESS_BASE_URL}/chat/completions`, {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${featherlessApiKey}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      model: 'meta-llama/Meta-Llama-3.1-70B-Instruct',
+      messages: [
+        { role: 'system', content: systemPrompt },
+        ...messages
+      ],
+      max_tokens: 500,
+      temperature: 0.3,
+    }),
+  });
+
+  if (!response.ok) {
+    throw new Error(`Featherless API error: ${response.statusText}`);
   }
 
-  const system = `You are ResQ, a disaster medical triage assistant. You read a transcript of a
-phone call between a resident with disabilities and an automated check-in system,
-and you produce a structured triage assessment for emergency responders.
+  const data = await response.json();
+  return data.choices[0].message.content;
+}
+
+async function runAITriage({ patient, transcript, name, location, reason }) {
+  // Build patient context - handle both registered patients and new callers
+  const patientName = name || patient?.name || 'Unknown caller';
+  const patientLocation = location || patient?.address || 'Location not provided';
+  const medicalConditions = patient?.medical_conditions || reason || 'Not specified';
+  const equipment = patient?.required_devices || 'Unknown';
+
+  // Heuristic fallback if no AI provider is available
+  if (AI_PROVIDER === 'anthropic' && !anthropic && !featherlessApiKey) {
+    return runHeuristicTriage({ transcript, reason, equipment });
+  }
+  if (AI_PROVIDER === 'featherless' && !featherlessApiKey && !anthropic) {
+    return runHeuristicTriage({ transcript, reason, equipment });
+  }
+
+  const system = `You are ResQ, an emergency medical triage AI assistant. You analyze calls from people in disaster situations and produce structured triage assessments for emergency responders.
+
+Your job is to:
+1. Assess the immediate danger level based on medical conditions, equipment needs, and current situation
+2. Determine if immediate evacuation is needed
+3. Create a brief, actionable summary for first responders
 
 Output ONLY valid JSON with this exact shape:
 {
@@ -197,87 +250,362 @@ Output ONLY valid JSON with this exact shape:
 }
 
 Priority guidance:
-  10 = life threatened in minutes (no oxygen, no ventilator, severe symptoms)
-   8-9 = critical, life-sustaining equipment failing or about to fail
-   5-7 = urgent, mobility/medication need within hours
-   3-4 = monitored, no immediate life threat
-   0-2 = safe, sheltered`;
+  10 = Immediate life threat (no oxygen, ventilator failing, severe injury, imminent danger)
+   8-9 = Critical - life-sustaining equipment failing or will fail within 1-2 hours
+   6-7 = Urgent - medical equipment needed within 4-6 hours, mobility issues in dangerous area
+   4-5 = Moderate - has medical needs but currently stable, may need assistance
+   2-3 = Low priority - safe location, has supplies, can shelter in place
+   0-1 = Safe - no immediate needs, well-sheltered
 
-  const user = `Patient profile:
-  Name: ${patient.name}
-  Address: ${patient.address}
-  Conditions: ${patient.medical_conditions || 'unknown'}
-  Equipment: ${patient.required_devices || 'none listed'}
+Consider:
+- Power outages affecting medical equipment (ventilators, oxygen concentrators, dialysis)
+- Battery life remaining on critical equipment
+- Mobility limitations (wheelchair users, bedridden)
+- Environmental hazards (smoke, flooding, no escape route)
+- Medical conditions that require immediate attention
+- Access to medications and supplies`;
 
-Call transcript:
+  const userContent = `Caller Information:
+Name: ${patientName}
+Location: ${patientLocation}
+Medical Conditions/Reason for Call: ${medicalConditions}
+Medical Equipment: ${equipment}
+
+Call Transcript:
 """
-${transcript}
+${transcript || reason || 'No transcript available'}
 """
 
-Return ONLY the JSON object.`;
+Analyze this emergency call and return ONLY the JSON object with priority, needs_evacuation, and briefing.`;
 
-  const msg = await anthropic.messages.create({
-    model: 'claude-sonnet-4-6',
-    max_tokens: 400,
-    system,
-    messages: [{ role: 'user', content: user }],
-  });
+  try {
+    let responseText;
 
-  const text = msg.content?.[0]?.text || '{}';
-  const jsonMatch = text.match(/\{[\s\S]*\}/);
-  const parsed = JSON.parse(jsonMatch ? jsonMatch[0] : '{}');
+    if (AI_PROVIDER === 'featherless' && featherlessApiKey) {
+      responseText = await callFeatherlessAPI(
+        [{ role: 'user', content: userContent }],
+        system
+      );
+    } else if (anthropic) {
+      const msg = await anthropic.messages.create({
+        model: 'claude-sonnet-4-20250514',
+        max_tokens: 500,
+        system,
+        messages: [{ role: 'user', content: userContent }],
+      });
+      responseText = msg.content?.[0]?.text || '{}';
+    } else {
+      return runHeuristicTriage({ transcript, reason, equipment });
+    }
+
+    // Extract JSON from response
+    const jsonMatch = responseText.match(/\{[\s\S]*\}/);
+    const parsed = JSON.parse(jsonMatch ? jsonMatch[0] : '{}');
+    
+    return {
+      priority: Math.max(0, Math.min(10, Number(parsed.priority) || 0)),
+      needs_evacuation: !!parsed.needs_evacuation,
+      briefing: String(parsed.briefing || 'Awaiting assessment').slice(0, 240),
+    };
+  } catch (err) {
+    console.error('[AI triage] failed:', err);
+    return runHeuristicTriage({ transcript, reason, equipment });
+  }
+}
+
+function runHeuristicTriage({ transcript, reason, equipment }) {
+  const text = `${transcript || ''} ${reason || ''}`.toLowerCase();
+  const equip = (equipment || '').toLowerCase();
+  
+  let priority = 3;
+  
+  // Critical equipment
+  if (/ventilator/.test(equip)) priority = 9;
+  if (/oxygen|concentrator/.test(equip)) priority = 8;
+  if (/dialysis/.test(equip)) priority = 7;
+  
+  // Power/battery issues
+  if (/no power|power out|power.{0,10}out/.test(text)) priority += 1;
+  if (/battery.{0,20}(dead|dying|low|fail)/.test(text)) priority += 2;
+  if (/battery.{0,20}(hour|minute)/.test(text)) priority += 1;
+  
+  // Medical emergencies
+  if (/can'?t breathe|trouble breathing|chest pain|heart/.test(text)) priority = 10;
+  if (/bleeding|injured|fell|broken/.test(text)) priority = Math.max(priority, 8);
+  if (/trapped|stuck|can'?t (move|get out|escape)/.test(text)) priority = Math.max(priority, 8);
+  
+  // Environmental hazards
+  if (/smoke|fire|flood|water rising/.test(text)) priority = Math.max(priority, 7);
+  
+  // Mobility issues
+  if (/wheelchair|can'?t walk|bedridden|immobile/.test(text)) priority += 1;
+  
+  // Positive indicators
+  if (/safe|okay|fine|sheltered/.test(text)) priority = Math.max(2, priority - 2);
+  if (/power.{0,10}(on|working|back)/.test(text)) priority = Math.max(2, priority - 1);
+  
+  priority = Math.max(0, Math.min(10, priority));
+  
   return {
-    priority: Math.max(0, Math.min(10, Number(parsed.priority) || 0)),
-    needs_evacuation: !!parsed.needs_evacuation,
-    briefing: String(parsed.briefing || '').slice(0, 240),
+    priority,
+    needs_evacuation: priority >= 7,
+    briefing: `Heuristic triage: ${equipment || 'no equipment listed'} · Priority ${priority}/10 · Needs review`,
   };
 }
 
 app.post('/triage', async (req, res) => {
-  const { patient_id, transcript } = req.body;
-  if (!patient_id || !transcript) {
-    return res.status(400).json({ error: 'patient_id and transcript required' });
-  }
-
-  const { data: patient, error } = await supabase
-    .from('patients')
-    .select('*')
-    .eq('id', patient_id)
-    .single();
-  if (error || !patient) {
-    return res.status(404).json({ error: 'patient not found' });
+  const { patient_id, transcript, name, location, reason } = req.body;
+  
+  // Support both registered patients and new callers
+  let patient = null;
+  
+  if (patient_id) {
+    const { data, error } = await supabase
+      .from('patients')
+      .select('*')
+      .eq('id', patient_id)
+      .single();
+    if (error) {
+      return res.status(404).json({ error: 'patient not found' });
+    }
+    patient = data;
+  } else if (!name && !location && !reason) {
+    return res.status(400).json({ 
+      error: 'Either patient_id or (name, location, reason) required' 
+    });
   }
 
   try {
-    const result = await runClaudeTriage({ patient, transcript });
+    const result = await runAITriage({ 
+      patient, 
+      transcript, 
+      name, 
+      location, 
+      reason 
+    });
+    
     const status =
       result.priority >= 8 ? 'Critical'
       : result.priority >= 5 ? 'Urgent'
       : result.priority >= 3 ? 'Monitored'
       : 'Safe';
 
-    await supabase
-      .from('patients')
-      .update({
-        priority: result.priority,
-        needs_evacuation: result.needs_evacuation,
-        briefing: result.briefing,
-        status,
-      })
-      .eq('id', patient_id);
+    // If this is a registered patient, update their record
+    if (patient_id) {
+      await supabase
+        .from('patients')
+        .update({
+          priority: result.priority,
+          needs_evacuation: result.needs_evacuation,
+          briefing: result.briefing,
+          status,
+        })
+        .eq('id', patient_id);
+    } else {
+      // For new callers, create a patient record
+      const { data: newPatient } = await supabase
+        .from('patients')
+        .insert({
+          name: name || 'Unknown Caller',
+          address: location || 'Location not provided',
+          phone: 'N/A',
+          medical_conditions: reason || 'Emergency call',
+          required_devices: '',
+          priority: result.priority,
+          needs_evacuation: result.needs_evacuation,
+          briefing: result.briefing,
+          status,
+        })
+        .select()
+        .single();
+      
+      if (newPatient) {
+        patient_id = newPatient.id;
+      }
+    }
 
-    // Append to calls log if the table exists.
+    // Log the call
     await supabase.from('calls').insert({
-      patient_id,
-      transcript,
+      patient_id: patient_id || null,
+      transcript: transcript || `Name: ${name}, Location: ${location}, Reason: ${reason}`,
       priority: result.priority,
       briefing: result.briefing,
       created_at: new Date().toISOString(),
     });
 
-    res.json({ ok: true, ...result, status });
+    res.json({ 
+      ok: true, 
+      ...result, 
+      status,
+      patient_id,
+      ai_provider: AI_PROVIDER 
+    });
   } catch (err) {
     console.error('[triage] failed:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// -----------------------------------------------------------------------------
+// Manual call entry - for testing without ElevenLabs webhook
+// -----------------------------------------------------------------------------
+// POST /add-call { name, location, reason }
+app.post('/add-call', async (req, res) => {
+  const { name, location, reason } = req.body;
+  
+  if (!name || !location || !reason) {
+    return res.status(400).json({ 
+      error: 'name, location, and reason are required' 
+    });
+  }
+
+  try {
+    // Run triage
+    const triageResult = await runAITriage({
+      patient: null,
+      transcript: `Caller: ${name}, Location: ${location}, Reason: ${reason}`,
+      name,
+      location,
+      reason,
+    });
+    
+    const status =
+      triageResult.priority >= 8 ? 'Critical'
+      : triageResult.priority >= 5 ? 'Urgent'
+      : triageResult.priority >= 3 ? 'Monitored'
+      : 'Safe';
+    
+    // Create patient record
+    const { data: newPatient, error: insertError } = await supabase
+      .from('patients')
+      .insert({
+        name: name,
+        address: location,
+        phone: 'N/A',
+        medical_conditions: reason,
+        required_devices: '',
+        priority: triageResult.priority,
+        needs_evacuation: triageResult.needs_evacuation,
+        briefing: triageResult.briefing,
+        status,
+        lat: 37.7749 + (Math.random() - 0.5) * 0.05, // Random SF location
+        lng: -122.4194 + (Math.random() - 0.5) * 0.05,
+      })
+      .select()
+      .single();
+    
+    if (insertError) throw insertError;
+    
+    // Log the call
+    await supabase.from('calls').insert({
+      patient_id: newPatient.id,
+      transcript: `Name: ${name}, Location: ${location}, Reason: ${reason}`,
+      priority: triageResult.priority,
+      briefing: triageResult.briefing,
+      created_at: new Date().toISOString(),
+    });
+    
+    console.log(`[add-call] Created patient: ${name} (Priority: ${triageResult.priority})`);
+    
+    res.json({ 
+      ok: true, 
+      patient_id: newPatient.id,
+      patient: newPatient,
+      ...triageResult,
+      status,
+      ai_provider: AI_PROVIDER 
+    });
+  } catch (err) {
+    console.error('[add-call] error:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// -----------------------------------------------------------------------------
+// ElevenLabs webhook — receives structured data from conversational AI
+// -----------------------------------------------------------------------------
+// POST /elevenlabs-webhook { name, location, reason, transcript }
+app.post('/elevenlabs-webhook', async (req, res) => {
+  console.log('[elevenlabs-webhook] received:', req.body);
+  
+  const { name, location, reason, transcript, patient_id } = req.body;
+  
+  try {
+    // Run triage on the collected information
+    const triageResult = await runAITriage({
+      patient: patient_id ? await supabase.from('patients').select('*').eq('id', patient_id).single().then(r => r.data) : null,
+      transcript: transcript || `Caller: ${name}, Location: ${location}, Reason: ${reason}`,
+      name,
+      location,
+      reason,
+    });
+    
+    const status =
+      triageResult.priority >= 8 ? 'Critical'
+      : triageResult.priority >= 5 ? 'Urgent'
+      : triageResult.priority >= 3 ? 'Monitored'
+      : 'Safe';
+    
+    // Create or update patient record
+    let finalPatientId = patient_id;
+    
+    if (patient_id) {
+      await supabase
+        .from('patients')
+        .update({
+          priority: triageResult.priority,
+          needs_evacuation: triageResult.needs_evacuation,
+          briefing: triageResult.briefing,
+          status,
+        })
+        .eq('id', patient_id);
+    } else {
+      const { data: newPatient, error: insertError } = await supabase
+        .from('patients')
+        .insert({
+          name: name || 'Unknown Caller',
+          address: location || 'Location not provided',
+          medical_conditions: reason || 'Emergency call',
+          required_devices: '',
+          priority: triageResult.priority,
+          needs_evacuation: triageResult.needs_evacuation,
+          briefing: triageResult.briefing,
+          status,
+          lat: 37.7749 + (Math.random() - 0.5) * 0.05,
+          lng: -122.4194 + (Math.random() - 0.5) * 0.05,
+        })
+        .select()
+        .single();
+      
+      if (insertError) {
+        console.error('[elevenlabs-webhook] Insert error:', insertError);
+        throw insertError;
+      }
+      
+      if (newPatient) {
+        finalPatientId = newPatient.id;
+        console.log('[elevenlabs-webhook] Created patient:', newPatient.id, newPatient.name);
+      }
+    }
+    
+    // Log the call
+    await supabase.from('calls').insert({
+      patient_id: finalPatientId || null,
+      transcript: transcript || `Name: ${name}, Location: ${location}, Reason: ${reason}`,
+      priority: triageResult.priority,
+      briefing: triageResult.briefing,
+      created_at: new Date().toISOString(),
+    });
+    
+    res.json({ 
+      ok: true, 
+      patient_id: finalPatientId,
+      ...triageResult,
+      status,
+      message: 'Emergency call processed successfully'
+    });
+  } catch (err) {
+    console.error('[elevenlabs-webhook] error:', err);
     res.status(500).json({ error: err.message });
   }
 });
@@ -354,7 +682,7 @@ app.post('/simulate-disaster', async (req, res) => {
     const p = targeted[i];
     const transcript = MOCK_TRANSCRIPTS[i % MOCK_TRANSCRIPTS.length];
     try {
-      const result = await runClaudeTriage({ patient: p, transcript });
+      const result = await runAITriage({ patient: p, transcript });
       const status =
         result.priority >= 8 ? 'Critical'
         : result.priority >= 5 ? 'Urgent'
@@ -386,7 +714,11 @@ app.post('/simulate-disaster', async (req, res) => {
 // -----------------------------------------------------------------------------
 const PORT = process.env.PORT || 3001;
 app.listen(PORT, () => {
+  const aiProvider = AI_PROVIDER === 'anthropic' && anthropic ? 'Anthropic Claude' 
+    : AI_PROVIDER === 'featherless' && featherlessApiKey ? 'Featherless (Llama 3.1 70B)'
+    : 'Heuristic fallback';
+  
   console.log(`ResQ backend running on port ${PORT}`);
-  console.log(`  Anthropic: ${anthropic ? 'enabled' : 'fallback (no key)'}`);
-  console.log(`  Twilio:    ${twilioClient ? 'enabled' : 'simulated (no creds)'}`);
+  console.log(`  AI Provider: ${aiProvider}`);
+  console.log(`  Twilio:      ${twilioClient ? 'enabled' : 'simulated (no creds)'}`);
 });
