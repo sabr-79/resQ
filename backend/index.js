@@ -302,11 +302,15 @@ Analyze this emergency call and return ONLY the JSON object with priority, needs
     const jsonMatch = responseText.match(/\{[\s\S]*\}/);
     const parsed = JSON.parse(jsonMatch ? jsonMatch[0] : '{}');
     
-    return {
-      priority: Math.max(0, Math.min(10, Number(parsed.priority) || 0)),
-      needs_evacuation: !!parsed.needs_evacuation,
-      briefing: String(parsed.briefing || 'Awaiting assessment').slice(0, 240),
-    };
+    const time_to_failure = estimateTimeToFailure(transcript || reason || "");
+
+return {
+  priority: Math.max(0, Math.min(10, Number(parsed.priority) || 0)),
+  needs_evacuation: !!parsed.needs_evacuation,
+  briefing: String(parsed.briefing || 'Awaiting assessment').slice(0, 240),
+  recommended_action: String(parsed.recommended_action || "Dispatch responders immediately"),
+  time_to_failure
+};
   } catch (err) {
     console.error('[AI triage] failed:', err);
     return runHeuristicTriage({ transcript, reason, equipment });
